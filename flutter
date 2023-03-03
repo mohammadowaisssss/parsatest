@@ -1,0 +1,219 @@
+import 'package:flutter/material.dart';
+import 'package:firebase_auth/firebase_auth.dart';
+import 'package:firebase_database/firebase_database.dart';
+import 'package:cloud_firestore/cloud_firestore.dart';
+import 'package:printing/printing.dart';
+
+// Define a User class to hold user information
+class User {
+  User({required this.uid, required this.email, required this.role});
+
+  final String uid;
+  final String email;
+  final String role;
+}
+
+void main() {
+  runApp(MyApp());
+}
+
+class MyApp extends StatelessWidget {
+  @override
+  Widget build(BuildContext context) {
+    return MaterialApp(
+      title: 'Bill App',
+      home: LoginScreen(),
+    );
+  }
+}
+
+class LoginScreen extends StatefulWidget {
+  @override
+  _LoginScreenState createState() => _LoginScreenState();
+}
+
+class _LoginScreenState extends State<LoginScreen> {
+  String email = '';
+  String password = '';
+
+  final _auth = FirebaseAuth.instance;
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      body: Center(
+        child: Column(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            TextField(
+              onChanged: (value) {
+                email = value;
+              },
+              decoration: InputDecoration(hintText: 'Enter your email'),
+            ),
+            TextField(
+              onChanged: (value) {
+                password = value;
+              },
+              decoration: InputDecoration(hintText: 'Enter your password'),
+              obscureText: true,
+            ),
+            SizedBox(height: 20.0),
+            ElevatedButton(
+              onPressed: () async {
+                try {
+                  final userCredential =
+                      await _auth.signInWithEmailAndPassword(
+                          email: email, password: password);
+                  if (userCredential.user != null) {
+                    final userSnapshot = await FirebaseFirestore.instance
+                        .collection('users')
+                        .doc(userCredential.user!.uid)
+                        .get();
+                    final user = User(
+                        uid: userCredential.user!.uid,
+                        email: userCredential.user!.email!,
+                        role: userSnapshot.get('role'));
+                    Navigator.push(
+                      context,
+                      MaterialPageRoute(
+                        builder: (context) => user.role == 'admin'
+                            ? AdminScreen()
+                            : UserScreen(user: user),
+                      ),
+                    );
+                  }
+                } catch (e) {
+                  print(e);
+                }
+              },
+              child: Text('Log In'),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class UserScreen extends StatelessWidget {
+  UserScreen({required this.user});
+
+  final User user;
+
+  final _db = FirebaseDatabase.instance.reference();
+
+  String name = '';
+  String amount = '';
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(
+        title: Text('User Screen'),
+      ),
+      body: Center(
+        child: Column(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            TextField(
+              onChanged: (value) {
+                name = value;
+              },
+              decoration: InputDecoration(hintText: 'Enter bill name'),
+            ),
+            TextField(
+              onChanged: (value) {
+                amount = value;
+              },
+              decoration: InputDecoration(hintText: 'Enter bill amount'),
+            ),
+            SizedBox(height: 20.0),
+            ElevatedButton(
+              onPressed: () async {
+                _db.child('bills').child(user.uid).push().set({
+                  'name': name,
+                  'amount': amount,
+                });
+                await Printing.layoutPdf(
+                    onLayout: (PdfPageFormat format) async {
+                  final billList = await FirebaseFirestore.instance
+                      .collection('bills')
+                      .doc(user.uid)
+                      .get();
+                  final bills = billList.data()!;
+                  return await generateBillPdf(bills);
+                });
+              },
+              child: Text('Create Bill'),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class AdminScreen extends StatelessWidget {
+  final _db = FirebaseDatabase.instance.reference();
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(
+        title: Text('Admin Screen'),
+      ),
+      body: Center(
+        child: StreamBuilder(
+          stream: _db.child('bills').onValue,
+          builder: (context, snapshot) {
+            if (snapshot.hasData) {
+              final data = snapshot.data as Event;
+              final billsMap =
+                  (data.snapshot.value as Map<dynamic, dynamic>).values.toList();
+              final bills = billsMap.map((bill) => Bill.fromMap(bill)).toList();
+              return ListView.builder(
+                itemCount: bills.length,
+                itemBuilder: (context, index) {
+                  return ListTile(
+                    title: Text(bills[index].name),
+                    subtitle: Text('${bills[index].amount}'),
+                  );
+                },
+              );
+            } else {
+              return CircularProgressIndicator();
+            }
+          },
+        ),
+      ),
+    );
+  }
+}
+
+class Bill {
+  final String name;
+  final String amount;
+
+  Bill({required this.name, required this.amount});
+
+  factory Bill.fromMap(Map<dynamic, dynamic> map) {
+    return Bill(
+      name: map['name'],
+      amount: map['amount'],
+    );
+  }
+}
+
+Future<List<List<int>>> generateBillPdf(Map<String, dynamic> bills) async {
+  final pdf = Printing.convertHtmlToPdf(
+      '<h1>Bill List</h1>\n'
+      '<table>\n'
+      '<tr><th>Bill Name</th><th>Amount</th></tr>\n' +
+          bills.entries
+              .map((e) =>
+                  '<tr><td>${e.value['name']}</td><td>${e.value['amount']}</td></tr>\n')
+              .join('') +
+          '</table>');
+  return pdf;
+}
